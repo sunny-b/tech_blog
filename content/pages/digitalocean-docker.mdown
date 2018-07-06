@@ -1,0 +1,218 @@
+Template: article
+Date: 15 September 2009
+Summary: My developer friendly CMS (Nesta) has just undergone some really positive refactoring. Articles and categories are a great way to organise a blog; they're user friendly and search engines love them. So nothing's changed there; I still want articles and categories. However, I've been using Nesta on e-commerce sites recently and have been finding that Nesta, as a general purpose CMS, didn't quite cut it.
+Read more: Read about the improvements
+Atom id: tag:effectif.com,2009-09-15:/nesta/merging-categories-and-articles
+
+# Easily deploy your Sinatra app to DigitalOcean with Docker
+
+Credit: DigitalOcean
+Being a web developer for the first couple years of my career, I didn’t need to learn much about server maintenance. When it came to deploying my own personal applications, Heroku was my best friends. A couple CLI commands and I had a live site. No hassle.
+
+However, when I joined DigitalOcean, I quickly learned that that would need to change. I would be involved in maintaining infrastructure and build pipelines. It was intimidating at first but I was determined to learn.
+
+While working on production servers gives me hands-on experience, I figured there were methods of practice that wouldn’t put millions of dollars at stake.
+
+That’s when I came up with the idea to move my personal site from Heroku to a DigitalOcean Droplet. What better practice? It’s a small, static site that uses Sinatra for some lightweight routing. I figured it wouldn’t be too difficult to deploy.
+
+There was one caveat. As a lazy developer, I love the ease of use of Heroku. For this migration to work, I needed to figure out a way to spin up my website in just one CLI command. That way, whenever I made changes, I could update the site in a matter of minutes.
+
+Luckily, that’s possible with docker-compose.
+
+In this article, I’ll be discussing how I was able to deploy my website to a DigitalOcean Droplet using Docker with the help of a Passenger app server and Nginx to serve my static files.
+
+By the end, you will have the tools you need to deploy and update your own Sinatra app with a single command, docker-compose up.
+
+
+Note: In case you’re unfamiliar with Docker, it’s a service that makes it incredibly easy to spin up apps inside of containers. How Docker works and the difference between virtual machines and containers are beyond the scope of this article. Read about it here if you’re curious.
+
+Additionally, I compiled a lot of this information from other tutorials. While I do add additional information and simplify many of the steps, if you get stuck, refer to them for additional information.
+
+Prerequisites
+Easily deploying a Sinatra app to DigitalOcean will require a number of upfront steps:
+
+Create a DigitalOcean Account and API Key
+Build a Sinatra app with a config.ru file
+Add the passenger gem to your Gemfile
+Install Docker, Docker-Machine, and Docker-Compose
+Why Docker-Machine?
+If you have docker installed natively on your machine, you may not see the need to install docker-machine. However, we’re going to run our containers on a remote virtual machine. We will use docker-machine to help us manage it.
+
+Once you have all of the necessary prereqs, we can begin.
+
+1. Spin up a Droplet
+The first step in this process is to spin up the virtual machine (VM)where we’ll be hosting our app. DigitalOcean makes this pretty simple using their cloud dashboard. However, there’s an even easier way with docker-machine.
+
+One of the prerequisite steps was to create a DigitalOcean API key. With that in hand, you can create a DigitalOcean Droplet with a single command:
+
+docker-machine create --driver digitalocean --digitalocean-access-token <your API Key> <droplet name>
+I have my API token saved as an environment variable, DO_TOKEN, so my command looks like this:
+
+docker-machine create --driver digitalocean --digitalocean-access-token $DO_TOKEN personal-site
+As you can see from the output on your terminal, this is creating a Droplet and assigning it an ssh key on your behalf. You can even see it in your DigitalOcean dashboard.
+
+
+The default configuration is a 1 GB Ubuntu Droplet in the New York datacenter. Use additional flags if you have different configuration needs.
+From here, you should be able to ssh into the VM:
+
+docker-machine ssh <droplet name>
+You should find yourself on a shell inside your VM. It will look something like:
+
+root@<droplet name>:~#
+The default Droplet that is created has 1 GB of memory and the Ubuntu 16.04.4 operating system. For a small app, this should be fine. If your app requires something different, use additional flags.
+
+2. Create a Dockerfile
+Passenger has an in depth tutorial on how to manually configure Nginx and Passenger inside of a VM. It’s long and thorough but it will work if you prefer to do it manually.
+
+We can avoid all of those steps by using Docker.
+
+In order to user Docker in our app, we need to include a Dockerfile. Passenger provides a variety of base images that we can build on. Since my personal site uses Ruby version 2.3.3, I picked the phusion/passenger-ruby23 base image.
+
+We can pull in a base image by including it in our Dockerfile.
+```
+FROM phusion/passenger-ruby23:0.9.33
+```
+Note: As of the time of this article, version 0.9.33 is the latest stable version of the phusion/passenger base file. It’s good to include a specific version instead of latest so that your app is not subject to breaking updates.
+
+Next we’ll want to set the correct environment for Docker, run Passenger’s init script, and enable Nginx:
+```
+# Set correct environment variables.
+ENV HOME /root
+
+# Use baseimage-docker's init process.
+CMD ["/sbin/my_init"]
+# Enable Nginx (it is disabled by default)
+RUN rm -f /etc/service/nginx/down
+```
+Next we’ll want to remove the default Nginx configuration and add our own.
+```
+RUN rm /etc/nginx/sites-enabled/default
+ADD app.conf /etc/nginx/sites-enabled/app.conf
+```
+Don’t worry if you aren’t sure where this app.conf file came from. We haven’t created it yet. We’ll be doing that in the next section.
+
+These next lines warrant some explaination:
+
+WORKDIR /home/app/<app name>
+COPY --chown=app:app . .
+RUN bundle install
+The first line is telling Docker to create the directory /home/app/<your app name> and move to it. It’s the same as running:
+
+RUN mkdir /home/app/<app name>
+RUN cd /home/app/<app name>
+Why house our app inside /home/app? As per the passenger-docker README:
+
+The [Passenger base] image has an app user with UID 9999 and home directory /home/app. Your application is supposed to run as this user. Even though Docker itself provides some isolation from the host OS, running applications without root privileges is good security practice.
+Your application should be placed inside /home/app.
+Note: when copying your application, make sure to set the ownership of the application directory to app by calling COPY --chown=app:app /local/path/of/your/app /home/app/webapp
+The Passenger base image is configured to run under the /home/app directory as the app user. This is why we have the line:
+
+COPY --chown=app:app . .
+It copies our app files over to the Docker container while simultaneously giving the app user ownership of our app directory. We then run bundle install to install the gem dependencies from our Gemfile.
+
+Finally, all that’s left is to clean up our image of any superfluous files to keep it’s size small and easy to deploy.
+
+RUN apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+In the end, your Dockerfile should look something like this (I’ve swapped personalSite with <app name> as that is the name of my app):
+
+
+3. Configure Nginx with app.conf
+Since we’re using Nginx in our application, let’s set it up. If you’ve used Unicorn or Puma before, you’re probably accustomed to long configuration files. Passenger takes care of all of the proxy boilerplate for us, so our app.conf doesn’t need to be complex.
+
+Mine looks like this:
+
+
+You don’t have to name this file app.conf. I just do it for simplicity.
+
+At the bottom of the server block, we pass in some Passenger data. The passenger_user field is telling Nginx the name of user that will be running the app on the VM.
+
+We know from the last section that this user is app. We also know that the location of the application directory is inside /home/app. That’s why I pointed the root value at /home/app/personalSite/public.personalSite is the name of my app and public is my static files folder.
+
+Finally, the passenger_ruby field is telling Passenger which version of Ruby with which it should run the application. Since my site uses Ruby 2.3.3, I’m using /usr/bin/ruby2.3 binary.
+
+Passenger comes with four main version of Ruby to choose from:
+
+/usr/bin/ruby2.1
+/usr/bin/ruby2.2
+/usr/bin/ruby2.3
+/usr/bin/ruby2.4
+Choose the one best suited for your application.
+
+With the app.conf file included, your project directory will look something like this:
+
+$ tree .
+.
+├── Dockerfile
+├── Gemfile
+├── Gemfile.lock
+├── Rakefile
+├── config.ru
+├── lib
+|  └── removed for brevity...
+├── public
+|  └── removed for brevity...
+├──app.rb
+├──views
+|  └── removed for brevity...
+└── app.conf
+At this point, we have all the files we need to run our app on Docker. Run these commands in your terminal to see for yourself:
+
+# This points our local Docker client at your remote machine
+eval (docker-machine env <droplet name>)
+# This will build and run your docker container
+docker build -t <image name> . && docker run -p 80:80 <image name>
+You can see your app by typing the IP address where your Droplet is located into a browser. You can find the IP address by either checking your DigitalOcean dashboard or asking docker-machine:
+
+docker-machine ip <machine name>
+4. (Optional) Setup docker-compose.yml
+Since our apps can already run on Docker, this is an optional step. However, Docker Compose can simplify the deployment process even more.
+
+Docker Compose is meant to help orchestrate complicated deployments with multiple containers. However, even though my website is small, it will allow me to spin up my app with a simple docker-compose up.
+
+If you want to be able to do the same, add a simple docker-compose.yml file to your project repo.
+
+
+This file is mapping port 80 on your VM to port 80 of your Docker container. Hence the 80:80. What this means in layman terms is that anyone who visits your Droplet on port 80 will be directed to the app on your Docker Container.
+
+This is important. Without mapping these two ports together, your app would be isolated from the Internet and no one would be able to visit it.
+
+The build property gives a relative path to the directory that contains our Dockerfile. Since the Dockerfile is inside the main directory, the relative path is .. Finally, the name of your app goes in the <app name> section.
+
+This example docker-compose.yml is sufficient for a simple Sinatra app. If you require a more complicated setup, such as attaching a database, I would suggest this tutorial from Jan David.
+
+With this file in place, you should be able to run your app using docker-compose up. If you want to run the app in the background so that it doesn’t take up your terminal, just add the -d flag.
+
+docker-compose up -d
+5. Get a domain and configure the nameservers
+With a running app in place, it’s time to point your domain at DigitalOcean’s nameservers.
+
+If you don’t have a domain yet, there are plenty of venders to choose from. If you’re not picky, you can get one from dot.tk for free.
+
+
+For paid domains, I usually go with GoDaddy.
+
+
+Having a domain isn’t enough. It’s not pointing to anything. This is where nameservers come in. Once you have your domain, go the Networking tab on the DigitalOcean dashboard and add the domain to your account.
+
+You should now be able to see the three nameservers that DigitalOcean provides.
+
+
+Go back to where you bought your domain from (dot.tk, Godaddy, etc) and add them to your DNS configuration.
+
+
+dot.tk
+
+Godaddy
+I would also recommend adding www and @ A records to your domain in the DigitalOcean dashboard and point them at the droplet that is running your app. In the end, the DNS records for you domain should look similar to this
+
+
+DNS is a tricky subject. If you have any trouble setting up nameservers or records, check out these helpful tutorials.
+
+There you have it. You should have a small Sinatra up and running in no time following these steps. The best part is that if you make changes to your site and want to update it with as little downtime as possible, just run:
+
+docker-compose up -d --build
+If in the future you need a refresher but don’t want to read this entire article again, I’ve listed all of the example files from this tutorial in this gist. You can also see how I use this files in a production setting on my personal site’s repo. As I’m not a Docker expert, please let me know if you find any bugs!
+
+So try it yourself and let me know how it goes in the comments below!
+
+Never stop pushing yourself to learn new things. Happy coding!
